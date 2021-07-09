@@ -694,8 +694,8 @@ contract SCCToken is Context, IERC20, Ownable {
     mapping (address => bool) private _isExcluded;
     mapping (address => uint256) private _lastTransferTime;
     mapping (address => uint256) private _lastClaimBonusTime;
-    mapping (address => uint256) private _lastTransferLimitTime;
-    mapping (address => uint8) private _lastTransferLimitCount;
+    mapping (address => uint256) public _lastTransferLimitTime;
+    mapping (address => uint256) public _lastTransferLimitCount;
 
     address[] private _excluded;
    
@@ -733,7 +733,7 @@ contract SCCToken is Context, IERC20, Ownable {
     
     uint256 public _maxTxAmount = 100 * 10**8 * 10**6;
     uint256 private numTokensSellToAddToLiquidity = 10 * 10**8 * 10**6;
-    uint256 private ONEDAY_TIME = 24 * 3600;
+    uint256 public _onedaySeconds = 24 * 3600;
     uint256 public _maxSwapAmount = 250 * 10**8 * 10**6;
     uint256 public LUCKY_THREDHOLD = 10**16;
     
@@ -869,10 +869,17 @@ contract SCCToken is Context, IERC20, Ownable {
    
     function setMaxTxPercent(uint256 maxTxPercent) external onlyOwner() {
         _maxTxAmount = _tTotal.mul(maxTxPercent).div(
-            10**2
+            10**4
         );
     }
+    
+    function setMaxTxAmount(uint256 maxTxAmount) external onlyOwner() {
+        _maxTxAmount = maxTxAmount;
+    }
 
+    function setOnedayTime(uint onedaySeconds) external onlyOwner() {
+        _onedaySeconds = onedaySeconds;
+    }
     function setSwapAndLiquifyEnabled(bool _enabled) public onlyOwner {
         swapAndLiquifyEnabled = _enabled;
         emit SwapAndLiquifyEnabledUpdated(_enabled);
@@ -950,23 +957,34 @@ contract SCCToken is Context, IERC20, Ownable {
         require(from != address(0), "ERC20: transfer from the zero address");
         require(to != address(0), "ERC20: transfer to the zero address");
         require(amount > 0, "Transfer amount must be greater than zero");
-        
-        if(from == uniswapV2Pair || to == uniswapV2Pair) {
-            if(from != owner() && to != owner()) {
-                require(amount <= _maxTxAmount, "Transfer amount exceeds the maxTxAmount.");
-                if ( _lastTransferLimitCount[msg.sender]>=20 ) {
-                    if (block.timestamp.sub(_lastTransferLimitTime[msg.sender]) >= ONEDAY_TIME) {
-                        _lastTransferLimitCount[msg.sender] = 0;
-                        _lastTransferLimitTime[msg.sender] = block.timestamp;
-                    }
-                    else
-                        require(_lastTransferLimitCount[msg.sender]<20, "Transfer exceeds limit 20 times per day .");
-                }
-            }
+        bool fromSwap; 
+        address limitAddress;
+        fromSwap = false;
+        if(from == uniswapV2Pair) {
+            limitAddress = to;
+            fromSwap = true;
+        } else if (to == uniswapV2Pair) {
+            limitAddress = from;
+            fromSwap = true;
         }
-        
-        _lastTransferLimitCount[msg.sender] = _lastTransferLimitCount[msg.sender] + 1;
-        _lastTransferTime[msg.sender] = block.timestamp;
+        if(fromSwap && !_isExcludedFromFee[from] && !_isExcludedFromFee[to]
+            && from != owner() && to != owner()) {
+            if ( _lastTransferLimitTime[limitAddress] < 1)
+                _lastTransferLimitTime[limitAddress] = block.timestamp;
+            if ( _lastTransferLimitCount[limitAddress]>=20 ) {
+                if (block.timestamp.sub(_lastTransferLimitTime[limitAddress]) >= _onedaySeconds) {
+                    _lastTransferLimitCount[limitAddress] = 0;
+                    _lastTransferLimitTime[limitAddress] = block.timestamp;
+                }
+                else
+                    require(_lastTransferLimitCount[limitAddress]<20, "Transfer exceeds limit 20 times per day .");
+            }
+            
+            require(amount <= _maxTxAmount, "Transfer amount exceeds the maxTxAmount.");
+            
+            _lastTransferTime[from] = block.timestamp;
+            _lastTransferLimitCount[limitAddress] = _lastTransferLimitCount[limitAddress].add(1);
+        }
         
         // // is the token balance of this contract address over the min number of
         // // tokens that we need to initiate a swap + liquidity lock?
@@ -1097,24 +1115,12 @@ contract SCCToken is Context, IERC20, Ownable {
             dealBonusAndLiquify(contractTokenBalance);
         }
     }
-    
-    function updatePrice() public {
-        _tokenPrice = 
-        (IUniswapV2Pair(uniswapV2Pair).price0CumulativeLast().sub(lastPrice0Cumulative)).div(block.timestamp.sub(lastPrice0Timestamp));
-        lastPrice0Cumulative = IUniswapV2Pair(uniswapV2Pair).price0CumulativeLast();
-        lastPrice0Timestamp = block.timestamp;
-    }
 
     function dealBonusAndLiquify(uint256 contractTokenBalance) private lockTheSwap {
         // split the contract balance into halves
         // 3/8 for liquidity, 5/8 for holder bonus
         uint256 half = contractTokenBalance.mul(3).div(16); // 
         uint256 otherHalf = contractTokenBalance.sub(half);
-        
-        // _tokenPrice = 
-        // (IUniswapV2Pair(uniswapV2Pair).price0CumulativeLast().sub(lastPrice0Cumulative)).div(block.timestamp.sub(lastPrice0Timestamp));
-        // lastPrice0Cumulative = IUniswapV2Pair(uniswapV2Pair).price0CumulativeLast();
-        // lastPrice0Timestamp = block.timestamp;
 
         // capture the contract's current ETH balance.
         // this is so that we can capture exactly the amount of ETH that the
@@ -1144,8 +1150,8 @@ contract SCCToken is Context, IERC20, Ownable {
         uint256 pooledETH = address(this).balance;
         // 0.0001 ETH, can claim bonus
         bool hazBonus = (pooledETH > 10**15) 
-            && (block.timestamp.sub(_lastClaimBonusTime[_msgSender()]) >= ONEDAY_TIME)
-            && (block.timestamp.sub(_lastTransferTime[_msgSender()]) >= ONEDAY_TIME);
+            && (block.timestamp.sub(_lastClaimBonusTime[_msgSender()]) >= _onedaySeconds)
+            && (block.timestamp.sub(_lastTransferTime[_msgSender()]) >= _onedaySeconds);
         uint256 bonus = balanceOf(_msgSender());
         return (hazBonus, bonus, totalBalance, pooledETH);
     }
@@ -1153,8 +1159,8 @@ contract SCCToken is Context, IERC20, Ownable {
     function claimForHolderBonus() public returns (bool) {
         uint256 pooledETH = address(this).balance;
         require(pooledETH > 10**15, "Total reward pool little than 0.1ETH.");
-        require(block.timestamp.sub(_lastClaimBonusTime[_msgSender()]) >= ONEDAY_TIME, "Last claim time little than 24 Hours.");
-        require(block.timestamp.sub(_lastTransferTime[_msgSender()]) >= ONEDAY_TIME, "Last tranfer time less than 24 Hours");
+        require(block.timestamp.sub(_lastClaimBonusTime[_msgSender()]) >= _onedaySeconds, "Last claim time little than 24 Hours.");
+        require(block.timestamp.sub(_lastTransferTime[_msgSender()]) >= _onedaySeconds, "Last tranfer time less than 24 Hours");
 
         _lastClaimBonusTime[_msgSender()] = block.timestamp;
         uint256 totalBalance = _tTotal.sub(balanceOf(owner())).sub(balanceOf(address(this)))
@@ -1212,7 +1218,7 @@ contract SCCToken is Context, IERC20, Ownable {
 }
 
 
-contract SCCIdoContract {
+contract SCCIdoContract is Ownable{
 
   // 1SCC = 10^6wei
   // 1ETH = 10^18wei
@@ -1264,19 +1270,21 @@ contract SCCIdoContract {
   uint public claimEndTimestamp;
 
   address payable erc20Address;
+  address public preIdoAddress;
   IERC20 public token;
-  
+  mapping(address => bool) public preclaims;
   mapping(address => Idoer) public idoers;
-  constructor(address payable erc20Address_, address beneficancy_, 
+  constructor(address preIdoAddress_, address payable erc20Address_, address beneficancy_, 
     uint idoStart_, uint idoEnd_, uint claimStart_, uint claimEnd_) payable public {
   	chairperson = msg.sender;
-  	remainSupply = TOTAL_ETH_SUPPLY;
+  	remainSupply = 0;
   	erc20Address = erc20Address_;
     beneficancy = beneficancy_;
     idoStartTimestamp = idoStart_;
     idoEndTimestamp = idoEnd_;
     claimStartTimestamp = claimStart_;
     claimEndTimestamp = claimEnd_;
+    preIdoAddress = preIdoAddress_;
   	token = SCCToken(erc20Address);
   }
   
@@ -1312,16 +1320,55 @@ contract SCCIdoContract {
     // }));
     return true;
   }
+  
+  function release() public  onlyOwner {
+      payable(chairperson).transfer(address(this).balance);
+      token.transfer(chairperson, token.balanceOf(address(this)));
+  }
 
+  function getPreclaim() public returns (bool){
+    uint timestamp = block.timestamp;
+  	require(timestamp >= claimStartTimestamp); //  && timestamp < claimEndTimestamp
+    // require(token.balanceOf(address(this)) >= idoers[msg.sender].sccValue, "SCCIdo has invalid balance.");
+  	
+  	Idoer memory idoer = idoers[msg.sender];
+  	if (!preclaims[msg.sender]) {
+  	    SCCIdoContract sccIdo = SCCIdoContract(preIdoAddress);
+        (uint256 ethValue, uint256 sccValue, bool claimed) = sccIdo.idoers(msg.sender);
+        
+        idoer.ethValue = ethValue;
+        idoer.sccValue = sccValue;
+        idoer.claimed = claimed;
+        preclaims[msg.sender] = true;
+        idoers[msg.sender] = idoer;
+  	}
+  	return true;
+  }
+  
   // claim
   function claimFromIdo() public returns (bool){
     uint timestamp = block.timestamp;
   	require(timestamp >= claimStartTimestamp); //  && timestamp < claimEndTimestamp
     // require(token.balanceOf(address(this)) >= idoers[msg.sender].sccValue, "SCCIdo has invalid balance.");
-  	require(idoers[msg.sender].sccValue >=10**6, "You need deposite fund first.");
-  	require(!idoers[msg.sender].claimed, "You already claimed");
-    require(idoers[msg.sender].sccValue >= MIN_SCC_CLAIM, "Claim value should big than 10000SCC");
+  	
   	Idoer memory idoer = idoers[msg.sender];
+  	idoer = idoers[msg.sender];
+  	
+  	if (!preclaims[msg.sender]) {
+  	    SCCIdoContract sccIdo = SCCIdoContract(preIdoAddress);
+        (uint256 ethValue, uint256 sccValue, bool claimed) = sccIdo.idoers(msg.sender);
+        
+        idoer.ethValue = ethValue;
+        idoer.sccValue = sccValue;
+        idoer.claimed = claimed;
+        preclaims[msg.sender] = true;
+        // idoers[msg.sender] = idoer;
+  	}
+  	
+  	require(idoer.sccValue >=10**6, "You need deposite fund first.");
+  	require(!idoer.claimed, "You already claimed");
+    require(idoer.sccValue >= MIN_SCC_CLAIM, "Claim value should big than 10000SCC");
+    
     uint value = idoer.sccValue;
     idoer.claimed = true;
     if (value > _maxIdoAmount) {
@@ -1337,7 +1384,7 @@ contract SCCIdoContract {
 
   function isIdoEnable() public view returns(bool) {
     uint timestamp = block.timestamp;
-    if (remainSupply > 0 && timestamp >= idoStartTimestamp && timestamp < idoEndTimestamp)
+    if (timestamp >= idoStartTimestamp && timestamp < idoEndTimestamp)
       return true;
     else
       return false;
@@ -1345,7 +1392,7 @@ contract SCCIdoContract {
 
   function isClaimEnable() public view returns(bool) {
     uint timestamp = block.timestamp;
-    if (remainSupply > 0 && timestamp >= claimStartTimestamp && timestamp < claimEndTimestamp)
+    if (timestamp >= claimStartTimestamp && timestamp < claimEndTimestamp)
       return true;
     else
       return false;
@@ -1356,10 +1403,21 @@ contract SCCIdoContract {
   }
 
   function getIdoRemainEth() public view returns(uint, uint) {
+    
+    if (!preclaims[msg.sender]) {
+        SCCIdoContract sccIdo = SCCIdoContract(preIdoAddress);
+        (uint256 ethValue, uint256 _, bool claimed) = sccIdo.idoers(msg.sender);
+        return (ethValue, MAX_DEPOSITE_ETH);
+    }
     return (idoers[msg.sender].ethValue, MAX_DEPOSITE_ETH);
   }
 
   function getIdoRemainSCC() public view returns(uint, uint) {
+    if (!preclaims[msg.sender]) {
+        SCCIdoContract sccIdo = SCCIdoContract(preIdoAddress);
+        (uint256 _, uint256 sccValue, bool claimed) = sccIdo.idoers(msg.sender);
+        return (sccValue, MAX_DEPOSITE_SCC);
+    }
     return (idoers[msg.sender].sccValue, MAX_DEPOSITE_SCC);
   }
 
@@ -1368,3 +1426,5 @@ contract SCCIdoContract {
   }
 
 }
+
+
